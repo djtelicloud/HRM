@@ -6,9 +6,29 @@ import torch.nn.functional as F
 
 try:
     from flash_attn_interface import flash_attn_func  # type: ignore[import]
-except ImportError:
-    # Fallback to FlashAttention 2
-    from flash_attn import flash_attn_func  # type: ignore[import]
+except Exception:
+    # Try FlashAttention 2
+    try:
+        from flash_attn import flash_attn_func  # type: ignore[import]
+    except Exception:
+        # Final fallback: use PyTorch scaled_dot_product_attention (works on CPU/GPU, incl. Windows)
+        def flash_attn_func(q, k, v, causal=False):  # type: ignore[no-redef]
+            """
+            Drop-in replacement using torch.nn.functional.scaled_dot_product_attention.
+            Expects q,k,v shaped [batch, seq, heads, head_dim]; returns same shape.
+            """
+            import torch
+            from torch.nn.functional import scaled_dot_product_attention as sdpa
+
+            q_dtype = q.dtype
+            # Move heads to dimension 1 for SDPA: [B, H, S, D]
+            qh = q.permute(0, 2, 1, 3).to(torch.float32)
+            kh = k.permute(0, 2, 1, 3).to(torch.float32)
+            vh = v.permute(0, 2, 1, 3).to(torch.float32)
+
+            out = sdpa(qh, kh, vh, is_causal=causal)
+            # Back to [B, S, H, D] and original dtype
+            return out.permute(0, 2, 1, 3).to(q_dtype)
 
 from models.common import trunc_normal_init_
 

@@ -56,6 +56,10 @@ class HierarchicalReasoningModel_ACTV1Config(BaseModel):
 
     forward_dtype: str = "bfloat16"
 
+    # Optional heads for Lightning Swarm memory-RAG use cases
+    enable_value_head: bool = False
+    enable_risk_head: bool = False
+
 
 class HierarchicalReasoningModel_ACTV1Block(nn.Module):
     def __init__(self, config: HierarchicalReasoningModel_ACTV1Config) -> None:
@@ -112,6 +116,10 @@ class HierarchicalReasoningModel_ACTV1_Inner(nn.Module):
         self.embed_tokens = CastedEmbedding(self.config.vocab_size, self.config.hidden_size, init_std=embed_init_std, cast_to=self.forward_dtype)
         self.lm_head      = CastedLinear(self.config.hidden_size, self.config.vocab_size, bias=False)
         self.q_head       = CastedLinear(self.config.hidden_size, 2, bias=True)
+
+        # Optional auxiliary heads
+        self.value_head = CastedLinear(self.config.hidden_size, 1, bias=True) if self.config.enable_value_head else None
+        self.risk_head  = CastedLinear(self.config.hidden_size, 1, bias=True) if self.config.enable_risk_head else None
 
         self.puzzle_emb_len = -(self.config.puzzle_emb_ndim // -self.config.hidden_size)  # ceil div
         if self.config.puzzle_emb_ndim > 0:
@@ -177,7 +185,7 @@ class HierarchicalReasoningModel_ACTV1_Inner(nn.Module):
             z_L=torch.where(reset_flag.view(-1, 1, 1), self.L_init, carry.z_L),
         )
 
-    def forward(self, carry: HierarchicalReasoningModel_ACTV1InnerCarry, batch: Dict[str, torch.Tensor]) -> Tuple[HierarchicalReasoningModel_ACTV1InnerCarry, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    def forward(self, carry: HierarchicalReasoningModel_ACTV1InnerCarry, batch: Dict[str, torch.Tensor]) -> Tuple[HierarchicalReasoningModel_ACTV1InnerCarry, torch.Tensor, Tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor]]:
         seq_info = dict(
             cos_sin=self.rotary_emb() if hasattr(self, "rotary_emb") else None,
         )
@@ -209,8 +217,15 @@ class HierarchicalReasoningModel_ACTV1_Inner(nn.Module):
 
         # Q head
         q_logits = self.q_head(z_H[:, 0]).to(torch.float32)
-        
-        return new_carry, output, (q_logits[..., 0], q_logits[..., 1])
+
+        # Extras (optional): value and risk
+        extras: Dict[str, torch.Tensor] = {"repr": z_H[:, 0].to(torch.float32)}
+        if self.value_head is not None:
+            extras["value"] = self.value_head(z_H[:, 0]).squeeze(-1).to(torch.float32)
+        if self.risk_head is not None:
+            extras["risk_logit"] = self.risk_head(z_H[:, 0]).squeeze(-1).to(torch.float32)
+
+        return new_carry, output, (q_logits[..., 0], q_logits[..., 1]), extras
 
 
 class HierarchicalReasoningModel_ACTV1(nn.Module):
@@ -246,13 +261,15 @@ class HierarchicalReasoningModel_ACTV1(nn.Module):
         new_current_data = {k: torch.where(carry.halted.view((-1, ) + (1, ) * (batch[k].ndim - 1)), batch[k], v) for k, v in carry.current_data.items()}
 
         # Forward inner model
-        new_inner_carry, logits, (q_halt_logits, q_continue_logits) = self.inner(new_inner_carry, new_current_data)
+        new_inner_carry, logits, (q_halt_logits, q_continue_logits), extras = self.inner(new_inner_carry, new_current_data)
 
-        outputs = {
+        outputs: Dict[str, torch.Tensor] = {
             "logits": logits,
             "q_halt_logits": q_halt_logits,
             "q_continue_logits": q_continue_logits
         }
+        # Pass-through optional extras
+        outputs.update(extras)
         
         with torch.no_grad():
             # Step
@@ -276,7 +293,7 @@ class HierarchicalReasoningModel_ACTV1(nn.Module):
                 # NOTE: No replay buffer and target networks for computing target Q-value.
                 # As batch_size is large, there're many parallel envs.
                 # Similar concept as PQN https://arxiv.org/abs/2407.04811
-                next_q_halt_logits, next_q_continue_logits = self.inner(new_inner_carry, new_current_data)[-1]
+                _nc, _lo, (next_q_halt_logits, next_q_continue_logits), _ex = self.inner(new_inner_carry, new_current_data)
                 
                 outputs["target_q_continue"] = torch.sigmoid(torch.where(is_last_step, next_q_halt_logits, torch.maximum(next_q_halt_logits, next_q_continue_logits)))
 

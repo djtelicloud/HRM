@@ -98,4 +98,16 @@ class ACTLossHead(nn.Module):
         # Filter outputs for return
         detached_outputs = {k: outputs[k].detach() for k in return_keys if k in outputs}
 
-        return new_carry, lm_loss + 0.5 * (q_halt_loss + q_continue_loss), metrics, detached_outputs, new_carry.halted.all()
+        # Optional auxiliary losses
+        aux_loss = 0
+        if ("value" in outputs) and ("value_targets" in new_carry.current_data):
+            value_loss = F.mse_loss(outputs["value"], new_carry.current_data["value_targets"].to(outputs["value"].dtype), reduction="sum")
+            metrics["value_loss"] = value_loss.detach()
+            aux_loss = aux_loss + value_loss
+        if ("risk_logit" in outputs) and ("risk_targets" in new_carry.current_data):
+            risk_loss = F.binary_cross_entropy_with_logits(outputs["risk_logit"], new_carry.current_data["risk_targets"].to(outputs["risk_logit"].dtype), reduction="sum")
+            metrics["risk_loss"] = risk_loss.detach()
+            aux_loss = aux_loss + risk_loss
+
+        total_loss = lm_loss + 0.5 * (q_halt_loss + q_continue_loss) + 0.1 * aux_loss
+        return new_carry, total_loss, metrics, detached_outputs, new_carry.halted.all()

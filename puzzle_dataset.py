@@ -80,17 +80,24 @@ class PuzzleDataset(IterableDataset):
             # Keep indices in memory
             "puzzle_identifiers": None,
             "puzzle_indices": None,
-            "group_indices": None
+            "group_indices": None,
+
+            # Optional targets for auxiliary heads (loaded if files exist)
+            "value_targets": "r",
+            "risk_targets": "r",
         }
 
         # Load data
         self._data = {}
         for set_name in self.metadata.sets:
-            # Load subset
-            self._data[set_name] = {
-                field_name: np.load(os.path.join(self.config.dataset_path, self.split, f"{set_name}__{field_name}.npy"), mmap_mode=mmap_mode)
-                for field_name, mmap_mode in field_mmap_modes.items()
-            }
+            # Load subset; skip optional fields that don't exist
+            subset = {}
+            for field_name, mmap_mode in field_mmap_modes.items():
+                path = os.path.join(self.config.dataset_path, self.split, f"{set_name}__{field_name}.npy")
+                if (field_name in {"value_targets", "risk_targets"}) and (not os.path.exists(path)):
+                    continue
+                subset[field_name] = np.load(path, mmap_mode=mmap_mode)
+            self._data[set_name] = subset
 
     def _collate_batch(self, batch):
         # Convert dtype
@@ -108,7 +115,9 @@ class PuzzleDataset(IterableDataset):
                 "inputs": self.metadata.pad_id,
                 "labels": IGNORE_LABEL_ID,
 
-                "puzzle_identifiers": self.metadata.blank_identifier_id
+                "puzzle_identifiers": self.metadata.blank_identifier_id,
+                "value_targets": 0,
+                "risk_targets": 0,
             }
             batch = {k: np.pad(v, ((0, pad_size), ) + ((0, 0), ) * (v.ndim - 1), constant_values=pad_values[k]) for k, v in batch.items()}
 
