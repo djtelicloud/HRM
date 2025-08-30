@@ -1,7 +1,7 @@
 import "dotenv/config";
 import express from "express";
-import { twiml as Twiml } from "twilio";
-import { Server as WSServer } from "ws";
+import Twilio from "twilio";
+import { WebSocketServer as WSServer } from "ws";
 import http from "http";
 
 import { RealtimeBridge, type IAudioBridge } from "./realtime_bridge.js";
@@ -21,7 +21,7 @@ app.use(express.static("public"));
 
 // Twilio Voice webhook: create a media stream to our WS
 app.post("/voice", async (req, res) => {
-  const response = new Twiml.VoiceResponse();
+  const response = new (Twilio as any).twiml.VoiceResponse();
   const connect = response.connect();
   // Bidirectional stream if supported on your Twilio account; else one-way
   // @ts-ignore
@@ -38,9 +38,9 @@ app.post("/call", async (req, res) => {
   if (!accountSid || !authToken || !from || !to) {
     return res.status(400).json({ error: "Twilio env vars missing" });
   }
-  const twilio = (await import("twilio")).default(accountSid, authToken);
+  const twilioClient = (await import("twilio")).default(accountSid, authToken);
   const url = `${PUBLIC_URL}/voice`;
-  const call = await twilio.calls.create({ url, from, to });
+  const call = await twilioClient.calls.create({ url, from, to });
   res.json({ sid: call.sid });
 });
 
