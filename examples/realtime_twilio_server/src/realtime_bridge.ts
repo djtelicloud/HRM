@@ -22,7 +22,7 @@ export class RealtimeBridge implements IAudioBridge {
 
   constructor(opts: RealtimeBridgeOpts) {
     this.key = opts.openaiApiKey;
-    this.model = opts.model || "gpt-4o-realtime-preview";
+    this.model = opts.model || "gpt-realtime";
   }
 
   connect(): Promise<void> {
