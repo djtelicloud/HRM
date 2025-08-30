@@ -6,7 +6,7 @@ import http from "http";
 
 import { RealtimeBridge, type IAudioBridge } from "./realtime_bridge.js";
 import { GeminiBridge } from "./gemini_bridge.js";
-import { hrmInitialize, hrmEncodeAtoms, hrmSeed, hrmStep, hrmFuse } from "./hrm_client.js";
+import { hrmInitialize, hrmEncodeAtoms, hrmSeed, hrmStep, hrmFuse, hrmStatus, hrmMetrics, hrmClear } from "./hrm_client.js";
 
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const PUBLIC_URL = process.env.PUBLIC_URL || `http://localhost:${PORT}`;
@@ -17,6 +17,7 @@ hrmInitialize().catch((e) => console.warn("HRM init failed (will init lazily):",
 const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
+app.use(express.static("public"));
 
 // Twilio Voice webhook: create a media stream to our WS
 app.post("/voice", async (req, res) => {
@@ -41,6 +42,29 @@ app.post("/call", async (req, res) => {
   const url = `${PUBLIC_URL}/voice`;
   const call = await twilio.calls.create({ url, from, to });
   res.json({ sid: call.sid });
+});
+
+// Simple UI proxy endpoints (avoid CORS to HRM controller)
+app.get("/ui/status", async (_req, res) => {
+  try { res.json(await hrmStatus()); } catch (e) { res.status(500).json({ error: (e as any)?.message || e }); }
+});
+app.get("/ui/metrics", async (_req, res) => {
+  try { res.json(await hrmMetrics()); } catch (e) { res.status(500).json({ error: (e as any)?.message || e }); }
+});
+app.get("/ui/best", async (req, res) => {
+  const k = Math.max(1, parseInt((req.query.k as string) || "1", 10));
+  try { res.json(await hrmFuse(k)); } catch (e) { res.status(500).json({ error: (e as any)?.message || e }); }
+});
+app.post("/ui/encode_and_seed", async (req, res) => {
+  try {
+    const atoms = Array.isArray(req.body?.atoms) ? req.body.atoms : [];
+    const enc = await hrmEncodeAtoms(atoms, 256);
+    const out = await hrmSeed(enc.inputs, req.body?.puzzle_identifier || 1);
+    res.json(out);
+  } catch (e) { res.status(500).json({ error: (e as any)?.message || e }); }
+});
+app.post("/ui/clear", async (_req, res) => {
+  try { res.json(await hrmClear()); } catch (e) { res.status(500).json({ error: (e as any)?.message || e }); }
 });
 
 // HTTP server + WS server for Twilio Media Streams

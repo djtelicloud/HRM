@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>HRM Lightning UI</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 16px; background: #0b0f14; color: #e6eef5; }
+      header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+      .card { background: #121923; border: 1px solid #1d2935; border-radius: 10px; padding: 12px; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
+      textarea { width: 100%; height: 120px; background: #0f151d; color: #cfe6ff; border: 1px solid #1d2935; border-radius: 8px; padding: 8px; }
+      button { background: #1e88e5; color: white; border: 0; border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+      button.secondary { background: #394b59; }
+      h2 { margin: 6px 0 10px; font-size: 16px; }
+      .advice { font-size: 14px; line-height: 1.4; }
+      .row { display: flex; gap: 8px; align-items: center; }
+      .tiny { opacity: 0.8; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1 style="margin:0;font-size:18px;">HRM Lightning Swarm — Live</h1>
+        <div class="tiny">Status, metrics, and fused advice. Use the atoms form to seed context.</div>
+      </div>
+      <div class="row">
+        <button id="refresh">Refresh</button>
+        <button id="clear" class="secondary">Clear</button>
+      </div>
+    </header>
+    <div class="grid">
+      <div class="card">
+        <h2>Fused Advice</h2>
+        <div id="advice" class="advice mono">Loading…</div>
+      </div>
+      <div class="card">
+        <h2>Metrics</h2>
+        <div id="metrics" class="mono">Loading…</div>
+      </div>
+      <div class="card">
+        <h2>Branches</h2>
+        <div id="status" class="mono" style="max-height:260px; overflow:auto">Loading…</div>
+      </div>
+      <div class="card">
+        <h2>Seed Atoms</h2>
+        <div class="tiny">One JSON per line, e.g.: {"role":"user","content":"How to triage PCI incident?"}</div>
+        <textarea id="atoms"></textarea>
+        <div class="row" style="margin-top:8px;">
+          <input id="pid" type="number" value="1" style="width:80px;" />
+          <button id="seed">Encode + Seed</button>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      async function fetchJSON(url, opts) {
+        const res = await fetch(url, opts);
+        if (!res.ok) throw new Error(await res.text());
+        return await res.json();
+      }
+      async function refreshAll() {
+        try {
+          const fused = await fetchJSON('/ui/best?k=3');
+          const advice = fused?.advice || '(no advice yet)';
+          document.getElementById('advice').textContent = advice;
+        } catch (e) {
+          document.getElementById('advice').textContent = '(error)';
+        }
+        try {
+          const m = await fetchJSON('/ui/metrics');
+          document.getElementById('metrics').textContent = JSON.stringify(m, null, 2);
+        } catch (e) {
+          document.getElementById('metrics').textContent = '(error)';
+        }
+        try {
+          const s = await fetchJSON('/ui/status');
+          document.getElementById('status').textContent = JSON.stringify(s, null, 2);
+        } catch (e) {
+          document.getElementById('status').textContent = '(error)';
+        }
+      }
+      document.getElementById('refresh').onclick = refreshAll;
+      document.getElementById('clear').onclick = async () => { await fetchJSON('/ui/clear', { method: 'POST' }); refreshAll(); };
+      document.getElementById('seed').onclick = async () => {
+        const raw = document.getElementById('atoms').value.trim().split(/\n+/).filter(Boolean);
+        const atoms = [];
+        for (const line of raw) { try { atoms.push(JSON.parse(line)); } catch {} }
+        const pid = parseInt(document.getElementById('pid').value || '1', 10);
+        await fetchJSON('/ui/encode_and_seed', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ atoms, puzzle_identifier: pid }) });
+        await refreshAll();
+      };
+      refreshAll();
+      setInterval(refreshAll, 1500);
+    </script>
+  </body>
+  </html>
+

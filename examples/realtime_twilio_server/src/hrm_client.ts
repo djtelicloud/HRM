@@ -50,3 +50,14 @@ export async function hrmFuse(k = 3) {
   return api(`/fuse?k=${k}`, undefined, "GET");
 }
 
+export async function hrmStatus() {
+  return api(`/status`, undefined, "GET");
+}
+
+export async function hrmMetrics() {
+  return api(`/metrics`, undefined, "GET");
+}
+
+export async function hrmClear() {
+  return api(`/clear`, {}, "POST");
+}
