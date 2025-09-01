@@ -2,14 +2,15 @@ import fetch from "node-fetch";
 
 const HRM_BASE = process.env.HRM_BASE || "http://127.0.0.1:8000";
 
-async function api(path: string, body?: any, method = "POST") {
+async function api<T = any>(path: string, body?: any, method = "POST"): Promise<T> {
   const res = await fetch(`${HRM_BASE}${path}`, {
     method,
     headers: { "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return await res.json();
+  const data = await res.json();
+  return data as T;
 }
 
 export async function hrmInitialize() {
@@ -30,8 +31,8 @@ export async function hrmInitialize() {
   return api("/initialize", init);
 }
 
-export async function hrmEncodeAtoms(atoms: any[], seq_len?: number) {
-  return api("/encode", { atoms, seq_len });
+export async function hrmEncodeAtoms(atoms: any[], seq_len?: number): Promise<{ inputs: number[] }> {
+  return api<{ inputs: number[] }>("/encode", { atoms, seq_len });
 }
 
 export async function hrmSeed(inputs: number[], puzzle_identifier = 1) {
@@ -46,8 +47,8 @@ export async function hrmBest(k = 1) {
   return api(`/best?k=${k}`, undefined, "GET");
 }
 
-export async function hrmFuse(k = 3) {
-  return api(`/fuse?k=${k}`, undefined, "GET");
+export async function hrmFuse(k = 3): Promise<{ advice: string }> {
+  return api<{ advice: string }>(`/fuse?k=${k}`, undefined, "GET");
 }
 
 export async function hrmStatus() {

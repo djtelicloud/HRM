@@ -1,12 +1,14 @@
 import fetch from "node-fetch";
 
+
 const BASE = process.env.HRM_BASE || "http://127.0.0.1:8000";
 
-async function api(path: string, opts: any = {}) {
+async function api<T = any>(path: string, opts: any = {}): Promise<T> {
   const url = `${BASE}${path}`;
   const res = await fetch(url, opts);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return await res.json();
+  const data = await res.json();
+  return data as T;
 }
 
 export async function ensureInitialized() {
@@ -27,8 +29,8 @@ export async function ensureInitialized() {
   return api("/initialize", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 }
 
-export async function encodeAtoms(atoms: any[], seq_len?: number) {
-  return api("/encode", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ atoms, seq_len }) });
+export async function encodeAtoms(atoms: any[], seq_len?: number): Promise<{ inputs: number[] }> {
+  return api<{ inputs: number[] }>("/encode", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ atoms, seq_len }) });
 }
 
 export async function seed(inputs: number[], puzzle_identifier = 1) {
@@ -43,8 +45,8 @@ export async function best(k = 1) {
   return api(`/best?k=${k}`);
 }
 
-export async function fuse(k = 3) {
-  return api(`/fuse?k=${k}`);
+export async function fuse(k = 3): Promise<{ advice: string }> {
+  return api<{ advice: string }>(`/fuse?k=${k}`);
 }
 
 export async function runDemoConversation(turns: string[]) {
@@ -58,4 +60,3 @@ export async function runDemoConversation(turns: string[]) {
     console.log("HRM-Advice:", fused.advice);
   }
 }
-
