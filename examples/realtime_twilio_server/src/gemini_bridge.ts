@@ -1,4 +1,11 @@
-import { GoogleGenAI, Modality, type Session, type LiveServerMessage } from "@google/genai";
+import {
+  EndSensitivity,
+  GoogleGenAI,
+  Modality,
+  type LiveConnectConfig,
+  type LiveServerMessage,
+  type Session,
+} from "@google/genai";
 
 export type GeminiBridgeOpts = {
   apiKey: string;
@@ -11,6 +18,10 @@ function encodeBase64(bytes: Uint8Array) {
 }
 
 export class GeminiBridge {
+  // Add sendEvent to satisfy IAudioBridge interface
+  sendEvent(_evt: any): void {
+    // No-op for Gemini; OpenAI bridge uses this for session updates
+  }
   private client: GoogleGenAI;
   private session?: Session;
   private opts: GeminiBridgeOpts;
@@ -22,7 +33,23 @@ export class GeminiBridge {
   }
 
   async connect(): Promise<void> {
-    const model = this.opts.model || "gemini-live-2.5-flash-preview";
+    const model = this.opts.model || "gemini-2.5-flash-preview-native-audio-dialog";
+    const liveConnectConfig: LiveConnectConfig = {
+      outputAudioTranscription: {},
+      inputAudioTranscription: {},
+      systemInstruction: this.opts.systemInstruction || "You are a helpful assistant.",
+      responseModalities: [Modality.AUDIO],
+      speechConfig: {
+        voiceConfig: { prebuiltVoiceConfig: { voiceName: "Orus" } },
+      },
+      realtimeInputConfig: {
+        automaticActivityDetection: {
+          disabled: false,
+          endOfSpeechSensitivity: EndSensitivity.END_SENSITIVITY_LOW,
+          silenceDurationMs: 100,
+        },
+      },
+    };
     this.session = await this.client.live.connect({
       model,
       callbacks: {
@@ -38,22 +65,12 @@ export class GeminiBridge {
           console.log("Gemini closed:", e?.reason || "");
         },
       },
-      config: {
-        outputAudioTranscription: {},
-        systemInstruction: this.opts.systemInstruction || "You are a helpful assistant.",
-        responseModalities: [Modality.AUDIO],
-        speechConfig: {
-          voiceConfig: { prebuiltVoiceConfig: { voiceName: "Orus" } },
-        },
-      },
+      config: liveConnectConfig,
     });
   }
 
   close() {
-    try {
-      // @ts-ignore — live sessions close on GC; no explicit close
-      this.session?.close?.();
-    } catch {}
+    this.session?.close();
   }
 
   onMessage(cb: (msg: any) => void) {
@@ -62,12 +79,13 @@ export class GeminiBridge {
 
   sendPcm16Audio(pcm16: Buffer) {
     if (!this.session) return;
-    const blob = {
-      data: encodeBase64(new Uint8Array(pcm16.buffer, pcm16.byteOffset, pcm16.byteLength)),
-      mimeType: "audio/pcm;rate=16000",
-    } as any; // Blob shape used by @google/genai
-    // @ts-ignore
-    this.session.sendRealtimeInput({ media: blob });
+    const base64Data = encodeBase64(new Uint8Array(pcm16.buffer, pcm16.byteOffset, pcm16.byteLength));
+    this.session.sendRealtimeInput({
+      audio: {
+        data: base64Data,
+        mimeType: "audio/pcm;rate=16000",
+      },
+    });
   }
 
   commitAudio() {
@@ -76,9 +94,6 @@ export class GeminiBridge {
 
   setInstructions(text: string) {
     // No direct session.update equivalent; push as user hint mid-stream
-    try {
-      // @ts-ignore
-      this.session?.sendClientContent({ turns: [{ role: "user", parts: [{ text }] }], turnComplete: false });
-    } catch {}
+    this.session?.sendClientContent({ turns: [{ role: "user", parts: [{ text }] }] });
   }
 }

@@ -1,12 +1,12 @@
 import "dotenv/config";
 import express from "express";
+import http from "http";
 import Twilio from "twilio";
 import { WebSocketServer as WSServer } from "ws";
-import http from "http";
 
-import { RealtimeBridge, type IAudioBridge } from "./realtime_bridge.js";
 import { GeminiBridge } from "./gemini_bridge.js";
-import { hrmInitialize, hrmEncodeAtoms, hrmSeed, hrmStep, hrmFuse, hrmStatus, hrmMetrics, hrmClear } from "./hrm_client.js";
+import { hrmClear, hrmEncodeAtoms, hrmFuse, hrmInitialize, hrmMetrics, hrmSeed, hrmStatus, hrmStep } from "./hrm_client.js";
+import { RealtimeBridge, type IAudioBridge } from "./realtime_bridge.js";
 
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const PUBLIC_URL = process.env.PUBLIC_URL || `http://localhost:${PORT}`;
@@ -58,7 +58,7 @@ app.get("/ui/best", async (req, res) => {
 app.post("/ui/encode_and_seed", async (req, res) => {
   try {
     const atoms = Array.isArray(req.body?.atoms) ? req.body.atoms : [];
-    const enc = await hrmEncodeAtoms(atoms, 256);
+    const enc = await hrmEncodeAtoms(atoms, 256) as { inputs: number[] };
     const out = await hrmSeed(enc.inputs, req.body?.puzzle_identifier || 1);
     res.json(out);
   } catch (e) { res.status(500).json({ error: (e as any)?.message || e }); }
@@ -248,20 +248,22 @@ wss.on("connection", async (ws, req) => {
   const timer = setInterval(async () => {
     try {
       // Build compact atoms (last few turns); here we only show assistant deltas collected above
-      const enc = await hrmEncodeAtoms(atoms.slice(-8), 256);
+      const enc = await hrmEncodeAtoms(atoms.slice(-8), 256) as { inputs: number[] };
       if (!seeded) {
         await hrmSeed(enc.inputs, 1);
         seeded = true;
       }
       await hrmStep(32);
-      const fused = await hrmFuse(3);
+      const fused = await hrmFuse(3) as { advice?: string };
       const advisory = clipAdviceText(fused?.advice || "");
       if (advisory) {
         if (bridge.setInstructions) {
           bridge.setInstructions(`HRM-Advice: ${advisory}`);
         } else {
           // Fallback: send as an event for OpenAI bridge
-          bridge.sendEvent({ type: "session.update", session: { instructions: `HRM-Advice: ${advisory}` } });
+          if (typeof bridge.sendEvent === "function") {
+            bridge.sendEvent({ type: "session.update", session: { instructions: `HRM-Advice: ${advisory}` } });
+          }
         }
       }
     } catch (e) {
