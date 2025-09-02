@@ -1,8 +1,14 @@
-import "dotenv/config";
+import dotenv from "dotenv";
 import express from "express";
 import http from "http";
+import path from "path";
 import Twilio from "twilio";
+import { fileURLToPath } from "url";
 import { WebSocketServer as WSServer } from "ws";
+// Load .env from the repository root so the example server picks up PUBLIC_URL
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+dotenv.config({ path: path.resolve(__dirname, "../../../.env") });
 
 import { GeminiBridge } from "./gemini_bridge.js";
 import { hrmClear, hrmEncodeAtoms, hrmFuse, hrmInitialize, hrmMetrics, hrmSeed, hrmStatus, hrmStep } from "./hrm_client.js";
@@ -10,6 +16,10 @@ import { RealtimeBridge, type IAudioBridge } from "./realtime_bridge.js";
 
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const PUBLIC_URL = process.env.PUBLIC_URL || `http://localhost:${PORT}`;
+
+function generateId(prefix = "evt_") {
+  return `${prefix}${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
+}
 
 // Boot HRM once on startup
 hrmInitialize().catch((e) => console.warn("HRM init failed (will init lazily):", e.message));
@@ -25,7 +35,9 @@ app.post("/voice", async (req, res) => {
   const connect = response.connect();
   // Bidirectional stream if supported on your Twilio account; else one-way
   // @ts-ignore
-  connect.stream({ url: `${PUBLIC_URL.replace("http", "ws")}/twilio-media`, track: "both" });
+  // For Connect/Stream use the Twilio-supported inbound track value so Twilio will accept the verb.
+  // Valid options for Connect/Stream are 'inbound_track' or 'outbound_track' (use inbound here).
+  connect.stream({ url: `${PUBLIC_URL.replace("http", "ws")}/twilio-media`, track: "inbound_track" });
   res.type("text/xml").send(response.toString());
 });
 
@@ -148,13 +160,18 @@ wss.on("connection", async (ws, req) => {
   console.log("Twilio media stream connected");
 
   const provider = (process.env.REALTIME_PROVIDER || "auto").toLowerCase();
+  console.log("Realtime provider configured:", provider, "OPENAI key present:", !!process.env.OPENAI_API_KEY, "GOOGLE key present:", !!process.env.GOOGLE_API_KEY);
   let bridge: IAudioBridge | null = null;
+  // Dedupe/throttle tracking for bridge error messages per connection
+  let lastBridgeError = "";
+  let lastBridgeErrorCount = 0;
   async function connectBridge() {
     if (provider === "openai" || provider === "auto") {
       try {
         const br = new RealtimeBridge({ openaiApiKey: process.env.OPENAI_API_KEY || "" });
         await br.connect();
         bridge = br;
+        console.log("Connected to OpenAI Realtime bridge");
         return;
       } catch (e) {
         console.warn("OpenAI Realtime connect error, will try Gemini:", (e as any)?.message || e);
@@ -165,6 +182,7 @@ wss.on("connection", async (ws, req) => {
       const br = new GeminiBridge({ apiKey: key, systemInstruction: "You are a helpful assistant." });
       await br.connect();
       bridge = br;
+      console.log("Connected to Gemini bridge");
       return;
     }
     throw new Error("No realtime provider available");
@@ -178,6 +196,31 @@ wss.on("connection", async (ws, req) => {
   let seeded = false;
 
   bridge.onMessage(async (msg) => {
+    try {
+      // Safely stringify large objects, trim for console
+      let out = "";
+      try { out = typeof msg === 'string' ? msg : JSON.stringify(msg); } catch { out = String(msg); }
+      if (out.length > 2000) out = out.slice(0, 2000) + "...(trimmed)";
+
+      // If the bridge returned an error object, dedupe and throttle repetitive prints
+      const isError = msg && (msg as any).type === 'error';
+      if (isError) {
+        if (out === lastBridgeError) {
+          lastBridgeErrorCount++;
+          // Log a short counter every 100 repeats to show activity but avoid flood
+          if (lastBridgeErrorCount % 100 === 0) {
+            console.error(`Realtime bridge error repeated ${lastBridgeErrorCount} times (same payload)`);
+          }
+        } else {
+          lastBridgeError = out;
+          lastBridgeErrorCount = 1;
+          console.error('Realtime bridge error payload (first occurrence):', out);
+        }
+      } else {
+        // non-error messages: print normally but keep output trimmed
+        console.log("Bridge -> onMessage", out);
+      }
+    } catch (e) { console.warn('Bridge log error', e); }
     // OpenAI Realtime events
     const t = msg?.type;
     if (t === "response.output_text.delta" && msg?.delta) {
@@ -186,12 +229,16 @@ wss.on("connection", async (ws, req) => {
     if (t === "response.audio.delta" && msg?.audio) {
       const pcm16 = Buffer.from(msg.audio, "base64");
       const mulaw = pcm16ToMuLaw(pcm16);
-      ws.send(JSON.stringify({ event: "media", media: { payload: mulaw.toString("base64") } }));
+      try {
+        ws.send(JSON.stringify({ event: "media", media: { payload: mulaw.toString("base64") } }));
+        console.log("Sent audio delta to Twilio, bytes:", mulaw.length);
+      } catch (e) { console.warn("Error sending audio to Twilio WS", e); }
     }
 
     // Gemini Live events
     const sc = msg?.serverContent;
     if (sc) {
+  try { console.log("Gemini serverContent received, parts:", (sc.modelTurn?.parts||[]).length); } catch {}
       const it = sc.inputTranscription?.text;
       const ot = sc.outputTranscription?.text;
       if (it) atoms.push({ role: "user", content: it });
@@ -203,7 +250,7 @@ wss.on("connection", async (ws, req) => {
         if (inline && inline.data) {
           const b = Buffer.from(inline.data, "base64");
           const mulaw = pcm16ToMuLaw(b);
-          ws.send(JSON.stringify({ event: "media", media: { payload: mulaw.toString("base64") } }));
+          try { ws.send(JSON.stringify({ event: "media", media: { payload: mulaw.toString("base64") } })); } catch (e) { console.warn("Error sending inline audio to Twilio WS", e); }
         }
       }
     }
@@ -213,19 +260,38 @@ wss.on("connection", async (ws, req) => {
     try {
       const msg = JSON.parse(data.toString());
       const event = msg.event;
+      console.log("Twilio WS -> message event:", event);
       if (event === "start") {
         console.log("Twilio stream start", msg.start);
       } else if (event === "media") {
         // Twilio sends base64 mu-law 8k audio
         const payload = msg.media?.payload;
+        console.log("Received media payload size:", payload ? payload.length : 0);
         if (payload) {
           const mu = Buffer.from(payload, "base64");
           const pcm16 = muLawToPcm16(mu);
           bridge.sendPcm16Audio(pcm16);
+          console.log("Forwarded audio to bridge, pcm16 bytes:", pcm16.length);
         }
       } else if (event === "stop") {
         console.log("Twilio stream stop");
         bridge.commitAudio();
+        // Ask the realtime model to create a response from the committed audio buffer
+        try {
+          const respCreate = {
+            event_id: generateId("evt_"),
+            type: "response.create",
+            response: {
+              // request audio and text modalities; model will respond using the audio pipeline if available
+              modalities: ["audio", "text"],
+            },
+          };
+          if (typeof bridge.sendEvent === "function") {
+            bridge.sendEvent(respCreate);
+            console.log("Sent response.create to bridge to trigger model reply");
+          }
+        } catch (e) { console.warn("Error sending response.create", e); }
+
         ws.close();
         bridge.close();
       } else if (event === "mark") {

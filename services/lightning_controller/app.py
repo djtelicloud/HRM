@@ -1,21 +1,24 @@
-from typing import List, Dict, Optional, Tuple
-from dataclasses import dataclass
 import os
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 
 import torch
 from fastapi import FastAPI
 from pydantic import BaseModel
 
 try:
-    from HRM.utils.functions import load_model_class  # when run as a package
-    from HRM.models.hrm.hrm_act_v1 import HierarchicalReasoningModel_ACTV1, HierarchicalReasoningModel_ACTV1Carry
-    from HRM.memory.encode_decode import Vocab, decode_logits_to_advice
     from HRM.memory.advice_dsl import decode_logits_to_advice as dsl_decode
+    from HRM.memory.encode_decode import Vocab, decode_logits_to_advice
+    from HRM.models.hrm.hrm_act_v1 import (
+        HierarchicalReasoningModel_ACTV1,
+        HierarchicalReasoningModel_ACTV1Carry)
+    from HRM.utils.functions import load_model_class  # when run as a package
 except Exception:  # fallback when executed from HRM root
-    from utils.functions import load_model_class
-    from models.hrm.hrm_act_v1 import HierarchicalReasoningModel_ACTV1, HierarchicalReasoningModel_ACTV1Carry
-    from memory.encode_decode import Vocab, decode_logits_to_advice
     from memory.advice_dsl import decode_logits_to_advice as dsl_decode
+    from memory.encode_decode import Vocab, decode_logits_to_advice
+    from models.hrm.hrm_act_v1 import (HierarchicalReasoningModel_ACTV1,
+                                       HierarchicalReasoningModel_ACTV1Carry)
+    from utils.functions import load_model_class
 
 
 app = FastAPI(title="HRM Lightning Controller", version="0.1")
@@ -35,7 +38,7 @@ class Branch:
     steps: int = 0
     visits: int = 0
     reward_sum: float = 0.0
-    last_scores: Dict[str, float] = None  # q_margin, value, risk
+    last_scores: Optional[Dict[str, float]] = None  # q_margin, value, risk
     last_logits: Optional[torch.Tensor] = None
     last_repr: Optional[torch.Tensor] = None  # representation vector for novelty/diversity
     lsh_sig: Optional[torch.Tensor] = None    # bit signature for novelty
@@ -113,19 +116,22 @@ class Controller:
         self._global_steps: int = 0
 
     def initialize(self, req: InitRequest):
-        cfg = dict(
-            **req.arch_overrides,
-            batch_size=req.batch_size,
-            vocab_size=req.vocab_size,
-            seq_len=req.seq_len,
-            num_puzzle_identifiers=req.num_puzzle_identifiers,
-            halt_max_steps=req.arch_overrides.get("halt_max_steps", 12),
-            halt_exploration_prob=0.0,
-        )
+        # Build config from provided arch_overrides safely to avoid duplicate-key errors
+        cfg = dict(req.arch_overrides or {})
+        cfg.update({
+            "batch_size": req.batch_size,
+            "vocab_size": req.vocab_size,
+            "seq_len": req.seq_len,
+            "num_puzzle_identifiers": req.num_puzzle_identifiers,
+            # preserve any explicit halt_max_steps from arch_overrides, else default to 12
+            "halt_max_steps": (req.arch_overrides.get("halt_max_steps") if req.arch_overrides else None) or 12,
+            "halt_exploration_prob": 0.0,
+        })
         model_cls = load_model_class(req.arch_name)
         with torch.device(device()):
             self.model = model_cls(cfg)
-            self.model.eval()
+            if self.model is not None:
+                self.model.eval()
             if req.checkpoint_path and os.path.exists(req.checkpoint_path):
                 try:
                     self.model.load_state_dict(torch.load(req.checkpoint_path, map_location=device()), assign=True)  # type: ignore
@@ -366,8 +372,13 @@ class Controller:
             adv.append(Advice(branch_id=b.branch_id, q_halt=q_hi, q_cont=q_ci, q_margin=margin, value=v, risk=r, confidence=conf))
 
         # Update top caches for redundancy penalty (keep a few best reprs/sigs)
-        ranked = sorted([b for b in self.branches.values() if b.last_repr is not None], key=lambda x: x.last_scores.get("q_margin", -1e9), reverse=True)[:8]
-        self._top_reprs = [b.last_repr for b in ranked]
+        ranked = sorted(
+            [b for b in self.branches.values() if b.last_repr is not None],
+            key=lambda x: (x.last_scores or {}).get("q_margin", -1e9),
+            reverse=True,
+        )[:8]
+        # filter out any None representations before storing
+        self._top_reprs = [b.last_repr for b in ranked if b.last_repr is not None]
         if self.sched.lsh_bits:
             setattr(self, "_top_sigs", [b.lsh_sig for b in ranked if b.lsh_sig is not None])
         self._global_steps += 1
@@ -401,9 +412,11 @@ def encode(req: EncodeRequest):
     seq_len = req.seq_len or (controller.model.config.seq_len if controller.model is not None else 256)  # type: ignore
     vocab_size = (controller.model.config.vocab_size if controller.model is not None else 256)  # type: ignore
     try:
-        from HRM.memory.encode_decode import Vocab as _V, encode_atoms_to_grid
+        from HRM.memory.encode_decode import Vocab as _V
+        from HRM.memory.encode_decode import encode_atoms_to_grid
     except Exception:
-        from memory.encode_decode import Vocab as _V, encode_atoms_to_grid
+        from memory.encode_decode import Vocab as _V
+        from memory.encode_decode import encode_atoms_to_grid
     vocab = _V(size=vocab_size)
     arr = encode_atoms_to_grid(req.atoms, seq_len=seq_len, vocab=vocab)
     return {"inputs": arr.tolist()}
@@ -413,7 +426,7 @@ def encode(req: EncodeRequest):
 def best(k: int = 1):
     # Select top-k by q_margin (fallback to visits)
     items = [b for b in controller.branches.values() if b.last_logits is not None]
-    items.sort(key=lambda b: b.last_scores.get("q_margin", -1e9), reverse=True)
+    items.sort(key=lambda b: (b.last_scores or {}).get("q_margin", -1e9), reverse=True)
     items = items[: max(1, k)]
 
     results = []
@@ -422,8 +435,12 @@ def best(k: int = 1):
 
     vocab = Vocab(size=controller.model.config.vocab_size)  # type: ignore
     for b in items:
-        advice = decode_logits_to_advice(b.last_logits, vocab)
-        advice_struct = dsl_decode(b.last_logits)
+        # defensive: mypy/linters can't always narrow Optional[...] from the list comprehension
+        logits = b.last_logits
+        if logits is None:
+            continue
+        advice = decode_logits_to_advice(logits, vocab)
+        advice_struct = dsl_decode(logits)
         results.append({
             "branch_id": b.branch_id,
             "scores": b.last_scores,
@@ -437,7 +454,7 @@ def best(k: int = 1):
 def fuse(k: int = 3):
     # Take top-k by margin and merge advice (simple union with dedupe)
     items = [b for b in controller.branches.values() if b.last_logits is not None]
-    items.sort(key=lambda b: b.last_scores.get("q_margin", -1e9), reverse=True)
+    items.sort(key=lambda b: (b.last_scores or {}).get("q_margin", -1e9), reverse=True)
     items = items[: max(1, k)]
 
     if controller.model is None or not items:
@@ -448,10 +465,14 @@ def fuse(k: int = 3):
     weights = []
     decoded = []
     for b in items:
-        adv = dsl_decode(b.last_logits)
+        # defensive: ensure logits is not None (items list filters, but help typecheckers)
+        logits = b.last_logits
+        if logits is None:
+            continue
+        adv = dsl_decode(logits)
         decoded.append(adv)
-        w = max(0.0, b.last_scores.get("q_margin", 0.0))
-        weights.append(w)
+    w = max(0.0, (b.last_scores or {}).get("q_margin", 0.0))
+    weights.append(w)
     # Normalize weights
     total_w = sum(weights) or 1.0
     weights = [w / total_w for w in weights]
@@ -477,9 +498,11 @@ def fuse(k: int = 3):
     fused["citations"] = sorted(list(fused["citations"]))
     # to text
     try:
-        from HRM.memory.advice_dsl import Advice as AdviceStruct, advice_to_text
+        from HRM.memory.advice_dsl import Advice as AdviceStruct
+        from HRM.memory.advice_dsl import advice_to_text
     except Exception:
-        from memory.advice_dsl import Advice as AdviceStruct, advice_to_text
+        from memory.advice_dsl import Advice as AdviceStruct
+        from memory.advice_dsl import advice_to_text
     fused_struct = AdviceStruct(plan=fused["plan"], constraints=fused["constraints"], tool_calls=fused["tool_calls"], citations=fused["citations"], risks=fused["risks"], escalation=fused["escalation"], confidence=fused["confidence"])
     return {"advice_struct": fused_struct.__dict__, "advice": advice_to_text(fused_struct)}
 
@@ -514,9 +537,9 @@ def metrics():
     if n == 0:
         return {"branches": 0, "waves": controller._global_steps}
     import statistics
-    margins = [b.last_scores.get("q_margin", 0.0) for b in controller.branches.values() if b.last_scores]
-    values = [b.last_scores.get("value", 0.0) for b in controller.branches.values() if b.last_scores]
-    risks = [b.last_scores.get("risk", 0.0) for b in controller.branches.values() if b.last_scores]
+    margins = [(b.last_scores or {}).get("q_margin", 0.0) for b in controller.branches.values() if b.last_scores]
+    values = [(b.last_scores or {}).get("value", 0.0) for b in controller.branches.values() if b.last_scores]
+    risks = [(b.last_scores or {}).get("risk", 0.0) for b in controller.branches.values() if b.last_scores]
     return {
         "branches": n,
         "waves": controller._global_steps,

@@ -1,11 +1,11 @@
-import { ensureInitialized, encodeAtoms, seed, step, best, fuse, runDemoConversation } from "./memory_agent.js";
+import { best, encodeAtoms, ensureInitialized, fuse, runDemoConversation, seed, step } from "./memory_agent.js";
 
 async function main() {
   await ensureInitialized();
   // Demo: text turns -> atoms -> HRM advice
   await runDemoConversation([
     "User: Need to triage a Twilio call drop issue.",
-    "Agent: I can help. What’s your call SID?",
+    "Agent: I can help. What's your call SID?",
     "User: CA123... and it drops after IVR.",
     "Agent: Checking logs and SIP traces.",
     "User: We also changed our webhook yesterday.",
